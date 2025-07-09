@@ -1,0 +1,246 @@
+---
+title: "647Project_EDA"
+author: "Stephen Jaeyoung Cho"
+date: "`2024-11-10`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, include=FALSE}
+#library(dbscan)
+#library(maps)
+#library(data.table)
+#library(fields)
+library(tidyverse)
+library(basemapR)
+library(sf)
+library(ggspatial)
+library(prettymapr)
+library(arrow)
+```
+
+* This Rmd file covers: introduction to NYC taxi data, data collection and cleaning process, 
+
+# 1. Introduction
+
+The New York City Taxi and Limousine Commission (TLC), created in 1971, is the agency responsible for licensing and regulating New York City's medallion (yellow) taxis, street hail livery (green) taxis, for-hire vehicles (FHVs), commuter vans, and paratransit vehicles. The TLC cooperates with taxi technology providers (now called technology service providers, or TSPs) to collect trip record information for each taxi and FHV trip completed by licensed drivers and vehicles.  
+
+Taxi trip data can be acquired from the TLC website (https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page), where the trip records are published, separated by year, month and vehicle type (yellow/green/FHV/High-volume FHV). Among the four vehicle types, we will first narrow our target down to yellow and green taxis, as they are the "traditional" taxi types that respond to street hails, as well as being incorporated under a more reliable source of data collection, contrary to FHV trip records that rely on corporations such as Uber, Lyft, etc.  
+
+```{r include=FALSE}
+data <- read.csv("cleaned_NYC_Yellow_Cab_2024-08_v2.csv")
+ogdata <- read.csv("cleaned_NYC_Yellow_Cab_2024-08.csv")
+example <- readRDS("ogExample.rds")
+
+set.seed(2)
+index <- sample(1:nrow(data), 5000)
+df_sample <- data[index,]
+```
+  
+```{r echo=FALSE}
+Type <- c("Yellow","Green")
+Trips <- c(2964624,56551)
+pie(Trips, labels=Trips, border="black", col=c("yellow","green"),main="Yellow & Green Taxi Trip Counts, Jan 2024", init.angle=-30)
+```
+  
+Regarding the two taxi types, we can easily observe that the usage of green, or the "boro" taxis, are very limited compared to yellow taxis; this is mainly due to their specific purpose of serving outer boroughs, which limits vehicles from picking up new passengers within the "yellow zone" of Manhattan, or within airports. This has led to 86% plunge in numbers of operating green cabs from 6,500 in 2015 to less than 900 in 2023.  
+
+It is clear that the nature of green taxis does not fit our purpose of understanding taxi demand patterns across all of New York City, as well as leading to very limited usage compared to yellow taxis. Therefore, the dataset used for this analysis will consist of trip record data of yellow taxis only.  
+
+Reference (decline of green taxi population): (https://www.nbcnewyork.com/news/local/green-cabs-are-being-phased-out-heres-what-will-replace-them/4302496/#:~:text=The%20Taxi%20and%20Limousine%20Commission,%25%20plunge%2C%20The%20City%20reported.)
+  
+  
+# 2. Dataset
+
+## 2-1. Introduction to Yellow Taxi Trip Data & Cleaning
+
+```{r example, echo=FALSE}
+head(example)
+```
+  
+Raw dataset provided by the TLC consists of 18 columns, with quite self-explanatory column names. Our key variables would be:  
+- Trip_Pickup_DateTime and Trip_Dropoff_DateTime, representing temporal information;
+- Lon/Lat columns, representing spatial information.  
+
+However, for the spatial portion of the data, it has recently seen a major change. The TLC no longer provides the coordinates of pickup/dropoff locations, that are replaced by location ID information that represents which "taxi zone" that each location falls into. While the exact lon/lat would better serve our purpose, only the records from 2009 and 2010 are available in such format. Since the scope of this analysis is to address recent trends of taxi demand, we have decided to rely on the taxi zone shapefile, also provided by the TLC, to address spatial nature of taxi data.  
+
+We will use the yellow taxi trip records of August 2024, which is the most recent data that has been published by the TLC, with sample size of 1 million trips.
+
+```{r include=FALSE}
+zoneshp <- st_read("taxi_zones.shp")
+zoneshp <- st_as_sf(zoneshp)
+head(zoneshp)
+```
+
+```{r}
+ggplot()+
+  annotation_map_tile(type = "osm", zoom = 12) +
+  geom_sf(data = zoneshp)+
+  labs(title = "NYC Taxi Zone Boundaries",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+  
+The TLC has divided New York City into 263 taxi zones, which are represented by "PULocationID","DOLocationID" columns in the dataset. In order to provide coordinates for each row in order to conduct spatial analysis, we calculate centroid coordinates for each taxi zone and add it to the original dataset:  
+
+```{r echo=FALSE}
+head(df_sample[,c(8,9,20:23)])
+```
+
+Six columns, as shown above, provides spatial information, especially the last 4 parameters that was calculated based on the first two from original data.  
+
+```{r, echo=FALSE}
+head(data[,c(2,3,24)])
+```
+  
+Another parameter, 'Duration' has been added by calculating the gap between pickup time and dropoff time for each row in minutes. Data points with missing pickup and/or dropoff time, as well as negative 'Duration' value were removed in the process.
+
+```{r include=FALSE}
+summary(ogdata$trip_distance)
+```
+  
+trip_distance, the total traveled distance of each trip recorded in miles, is another parameter that played a crucial role in the data cleaning process, since many data points had abnormal values, such as zero or extremely large numbers. Such data points were treated as outliers and have been removed, resulting in 821022 rows remaining.
+
+```{r}
+ggplot()+
+  annotation_map_tile(type = "osm", zoom = 12) +
+  geom_sf(data = zoneshp, aes(fill = borough))
+```
+  
+Taxi zone shapefile also provides useful information about the TLC's taxi zone system. Based on the New York City's subdivision ('borough') information from the data, we can potentially conduct borough-based analysis as well. Furthermore, it is notable that the legend consists of 'EWR' as well as five boroughs of NYC, with only one taxi zone, 'Newark Airport' under this category. While the Newark International Airport is administratively no longer a part of NYC since October of 2022, it still covers a notable volume of NYC residents' travels due to its proximity for certain regions. The TLC has seemingly acknowledged such history and decided to keep EWR considered as a within-NYC taxi zone.  
+
+## 2-2. Exploratory Data Analysis
+
+## 1) Pickup/Dropoff Counts by Zones
+  
+Total counts of pickup/dropoff occurrences from each zone is a simple, yet effective way of understanding patterns of taxi demand.  
+
+```{r PUcounts, include=FALSE}
+PUcounts <- table(data$PULocationID)
+PUcounts <- as.data.frame(PUcounts)
+colnames(PUcounts) <- c("LocationID", "PUCounts")
+head(PUcounts)
+zoneshp_2 <- merge(zoneshp, PUcounts, by = "LocationID", all = TRUE)
+```
+
+```{r}
+ggplot()+
+  annotation_map_tile(type = "osm", zoom = 12) +
+  geom_sf(data = zoneshp_2, aes(fill = PUCounts))+
+  scale_fill_distiller(palette = "Spectral")+
+  labs(title = "NYC Yellow Cab Pickup Counts by Taxi Zone",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+  
+We can further retrieve top 10 zones in terms of pickup counts for more details:  
+
+```{r}
+top_n(zoneshp_2, 10, PUCounts)[,5:7]
+```
+  
+Manhattan borough, especially midtown Manhattan area, is dominant in terms of pickup counts.  
+
+```{r}
+zoneshp_2 %>% filter(is.na(PUCounts))
+```
+  
+There are also several taxi zones in gray, which have NA values for 'PUCounts' column, due to having no pickup from such locations recorded in this particular dataset. However, it is notable that 'Governor's Island/Ellis Island/Liberty Island' (row 1,2 and 3) will always have zero pickup counts, since these areas can only be accessed by ferry boats.  
+  
+
+```{r DOcounts, include=FALSE}
+DOcounts <- table(data$DOLocationID)
+DOcounts <- as.data.frame(DOcounts)
+colnames(DOcounts) <- c("LocationID", "DOCounts")
+zoneshp_2 <- merge(zoneshp_2, DOcounts, by = "LocationID", all = TRUE)
+```
+
+```{r}
+ggplot()+
+  annotation_map_tile(type = "osm", zoom = 12) +
+  geom_sf(data = zoneshp_2, aes(fill = DOCounts))+
+  scale_fill_distiller(palette = "Spectral")+
+  labs(title = "NYC Yellow Cab Dropoff Counts",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+  
+```{r echo=FALSE}
+top_n(zoneshp_2, 10, DOCounts)[,5:8]
+```
+
+Dropoffs are also very concentrated in central Manhattan area.
+
+```{r}
+zoneshp_2 %>% filter(is.na(DOCounts))
+```
+
+Aside from aforementioned three islands, there are also zones without taxi dropoff records, or no pickup/dropoff records at all.
+
+## 2) Trip Duration (scrapped)
+
+This part was not included to the final report; while the 'Duration' variable was crucial in data cleaning process, the team decided that further analysis on this variable was irrelevant to the goal of this research.
+
+```{r timeprocessing, include=FALSE}
+data <- data %>% mutate(tpep_pickup_datetime = as.POSIXct(strptime(tpep_pickup_datetime, "%Y-%m-%d %H:%M:%S")))
+data <- data %>% mutate(tpep_dropoff_datetime = as.POSIXct(strptime(tpep_dropoff_datetime, "%Y-%m-%d %H:%M:%S")))
+```
+
+
+```{r include=FALSE}
+#summary(data$trip_distance)
+#boxplot(data$trip_distance)
+#filter(data, is.na(data$RatecodeID))
+#filter(data, trip_distance > 50)
+#library(hms)
+#data$Duration = as_hms(difftime(data$tpep_dropoff_datetime, data$tpep_pickup_datetime))
+#head(data)
+#as_hms(difftime(lubridate::as_datetime(data$tpep_dropoff_datetime[1]), lubridate::as_datetime(data$tpep_pickup_datetime[1]), units = "mins"))
+#works properly for individual rows; not when creating a new column
+```
+
+```{r Duration_boxplot}
+summary(data$Duration)
+ggplot(data, aes(x= "Trips", y=Duration))+
+  geom_boxplot(notch=TRUE, fill = "yellow", alpha = 0.3, size = 1.2)+
+  labs(title = "Boxplot of Yellow Taxi Trip Durations")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r Duration_histogram}
+#version 1
+ggplot(data, aes(x=Duration))+
+  geom_histogram(color="darkblue", fill="lightblue")+
+  labs(title = "Distribution of Yellow Taxi Trip Duration")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+From the plots, we can observe that the duration of yellow taxi rides average in 12 minutes, with most rides lasting less than 10 minutes and very few rides last 20 minutes or longer.
+
+## 3) Distribution of pickup counts by time
+
+```{r PickupTime_Date}
+ggplot(data, aes(x=as.Date(tpep_pickup_datetime)))+
+  geom_bar(color="darkred", fill="red", alpha = 0.3)+
+  labs(title = "Daily Yellow Taxi Pickup Counts of August 2024")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+```{r}
+ggplot(data, aes(x=as.Date(tpep_pickup_datetime)))+
+  geom_histogram(color="darkred", fill="red", alpha = 0.3)+
+  labs(title = "Daily Yellow Taxi Pickup Counts of August 2024")+
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Bar plot and histogram from the same data show different visuals, suggesting that the 'tpep_pickup_datetime' variable from the original data may not be in the proper date & time format.
+
+## 4) Next steps
+
+Since our analysis on taxi demand considers both space and time, time-related variables from the data set would need further processing. Overview of pickup counts based on time periods - hour, weekday, mainly - would be necessary to better reflect the goal of this project.
